@@ -5,7 +5,7 @@ import uuid
 from threading import Thread
 import io
 import torch
-from transformers import pipeline # CORRECTED IMPORT
+from transformers import pipeline
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
@@ -19,8 +19,6 @@ tasks = {}
 
 # --- Whisper Model Loading (using insanely-fast-whisper) ---
 # This uses the Hugging Face pipeline, which insanely-fast-whisper optimizes.
-# We'll use the 'base' model to stay consistent.
-# For GPU, you would add: device="cuda:0", torch_dtype=torch.float16
 try:
     pipe = pipeline(
         "automatic-speech-recognition",
@@ -33,13 +31,15 @@ except Exception as e:
     exit()
 
 # --- Core Transcription Function ---
-def generate_srt(path, file_name):
+def generate_srt(path, file_name, language='en'):
     """
-    Transcribes the audio file using insanely-fast-whisper and generates an SRT formatted string.
+    Transcribes the audio file using insanely-fast-whisper in a specified language
+    and generates an SRT formatted string.
     """
     try:
-        # Transcribe the audio. `return_timestamps='word'` or `True` gives us chunk timestamps.
-        output = pipe(path, return_timestamps=True)
+        # Pass the language to the pipeline using generate_kwargs
+        print(f"Starting transcription for {file_name} in language: {language}")
+        output = pipe(path, return_timestamps=True, generate_kwargs={"language": language})
         print(f"Transcription successful for {file_name}")
 
         srt_content = ""
@@ -48,7 +48,7 @@ def generate_srt(path, file_name):
         for chunk in output['chunks']:
             start_seconds, end_seconds = chunk['timestamp']
             
-            # Create timedelta objects
+            # Create timedelta objects, handling potential None values
             start_time_td = timedelta(seconds=start_seconds or 0)
             end_time_td = timedelta(seconds=end_seconds or 0)
 
@@ -66,13 +66,13 @@ def generate_srt(path, file_name):
         return None
 
 # --- Background Task Function ---
-def process_audio_task(task_id, audio_path, file_name):
+def process_audio_task(task_id, audio_path, file_name, language='en'):
     """
     Function to run the transcription in a background thread.
     Updates the global 'tasks' dictionary with the result.
     """
-    print(f"Starting transcription for task: {task_id}")
-    srt_result = generate_srt(audio_path, file_name)
+    print(f"Starting background transcription task: {task_id}")
+    srt_result = generate_srt(audio_path, file_name, language=language)
     if srt_result is not None:
         tasks[task_id]['status'] = 'completed'
         tasks[task_id]['result'] = srt_result
@@ -87,12 +87,12 @@ def process_audio_task(task_id, audio_path, file_name):
         print(f"Error removing file {audio_path}: {e}")
 
 # --- API Endpoints ---
-# (Endpoints remain the same as before)
 
 @app.route('/tasks', methods=['POST'])
 def submit_task():
     """
     Endpoint to submit an audio file for transcription.
+    Accepts a 'language' parameter in the form data.
     Starts a background task and returns a task ID.
     """
     if 'audio' not in request.files:
@@ -101,6 +101,9 @@ def submit_task():
     audio_file = request.files['audio']
     if audio_file.filename == '':
         return jsonify({"error": "No selected file"}), 400
+        
+    # Get language from form data, default to 'en' (English)
+    language = request.form.get('language', 'en')
 
     task_id = str(uuid.uuid4())
     file_extension = os.path.splitext(audio_file.filename)[1]
@@ -110,7 +113,8 @@ def submit_task():
 
     tasks[task_id] = {'status': 'processing'}
 
-    thread = Thread(target=process_audio_task, args=(task_id, audio_path, audio_file.filename))
+    # Pass the language to the background thread
+    thread = Thread(target=process_audio_task, args=(task_id, audio_path, audio_file.filename, language))
     thread.start()
 
     return jsonify({"task_id": task_id})
@@ -119,6 +123,7 @@ def submit_task():
 def get_task_result(task_id):
     """
     Endpoint to check the status of a task and get the SRT result.
+    (This endpoint doesn't need changes as the result is self-contained)
     """
     task = tasks.get(task_id)
     if not task:
@@ -142,6 +147,7 @@ def get_task_result(task_id):
 def transcribe_directly():
     """
     Endpoint to submit an audio file and get the SRT content directly.
+    Accepts a 'language' parameter in the form data.
     """
     if 'audio' not in request.files:
         return jsonify({"error": "No audio file provided"}), 400
@@ -150,11 +156,15 @@ def transcribe_directly():
     if audio_file.filename == '':
         return jsonify({"error": "No selected file"}), 400
     
+    # Get language from form data, default to 'en' (English)
+    language = request.form.get('language', 'en')
+    
     temp_filename = str(uuid.uuid4())
     audio_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
     audio_file.save(audio_path)
 
-    srt_result = generate_srt(audio_path, audio_file.filename)
+    # Pass the language to the transcription function
+    srt_result = generate_srt(audio_path, audio_file.filename, language=language)
     
     os.remove(audio_path)
 
